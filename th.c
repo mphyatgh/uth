@@ -14,62 +14,104 @@ typedef void (*ctx_func_t)(void);
 static struct cpu   g_cpu[NR_CPU];
 int                 g_end = 0;
 
-static void get_wait_ts(struct cpu *cpu, struct timespec *ts)
+static inline void ts_adjust(struct timespec *ts)
 {
-    struct lh   *lh;
+    if (ts->tv_nsec >= 1000000000UL) {
+        ldiv_t  q = ldiv(ts->tv_nsec, 1000000000L);
+        ts->tv_sec += q.quot;
+        ts->tv_nsec -=  q.rem;
+    }
+}
+
+static inline int ts_after(struct timespec *a, struct timespec *b)
+{
+    return  (a->tv_sec>b->tv_sec) ||
+            (a->tv_sec==b->tv_sec && a->tv_nsec>b->tv_nsec);
+}
+
+static inline void get_wait_ts(struct cpu *cpu, struct timespec *ts)
+{
     struct th   *th;
 
     assert(!l_empty(&cpu->sleep));
 
-    lh = l_first(&cpu->sleep);
-    th = l_entry(lh, struct th, node);
-    ts->tv_sec = th->sleep.tv_sec;
-    ts->tv_nsec = th->sleep.tv_nsec;
+    th = l_entry(l_first(&cpu->sleep), struct th, node);
+    *ts = th->sleep;
+}
+
+static inline void append_to_ready_unlocked(struct th *th, struct cpu *cpu)
+{
+    l_add_tail(&th->node, &cpu->ready);
+    th->state = TH_READY;
+}
+
+static inline void append_to_ready(struct th *th, struct cpu *cpu)
+{
+    pthread_spin_lock(&cpu->spin);
+    l_add_tail(&th->node, &cpu->ready);
+    pthread_spin_unlock(&cpu->spin);
+    th->state = TH_READY;
+}
+
+static inline struct th *pop_from_ready(struct cpu *cpu)
+{
+    struct th   *th; 
+
+    th = l_entry(l_first(&cpu->ready), struct th, node);
+    pthread_spin_lock(&cpu->spin);
+    l_del(&th->node);
+    pthread_spin_unlock(&cpu->spin);
+    th->state = TH_RUN;
+    return th;
 }
 
 static void wakeup_sleep_if_need(struct cpu *cpu)
 {
-    struct timespec ts, *s;
-    struct lh       *lh;
+    struct timespec ts;
     struct th       *th;
 
     if (l_empty(&cpu->sleep))
         return;
 
-    lh = l_first(&cpu->sleep);
-    th = l_entry(lh, struct th, node);
-    s = &th->sleep;
+    th = l_entry(l_first(&cpu->sleep), struct th, node);
     
     clock_gettime(CLOCK_REALTIME, &ts);
-    if (s->tv_sec<ts.tv_sec || (s->tv_sec==ts.tv_sec && s->tv_nsec<=ts.tv_nsec)) {
-        l_del(lh);
-        l_add_tail(lh, &cpu->ready);
+    if (ts_after(&ts, &th->sleep)) {
+        l_del(&th->node);
+        append_to_ready(th, cpu);
     }
 }
 
 static void sched(struct cpu *cpu)
 {
-    struct lh   *lh;
     struct th   *old = cpu->run;
 
-    pthread_mutex_lock(&cpu->mutex); 
     wakeup_sleep_if_need(cpu);
-    while (!g_end && l_empty(&cpu->ready)) {
+    while (l_empty(&cpu->ready)) {
+        struct timespec ts0, ts1;
+
+        clock_gettime(CLOCK_REALTIME, &ts0);
+        ts0.tv_nsec += 4000000L;                /* HZ = 250 */
+        ts_adjust(&ts0);
+        
         if (!l_empty(&cpu->sleep))  {
-            struct timespec ts;
-            get_wait_ts(cpu, &ts);
-            pthread_cond_timedwait(&cpu->cond, &cpu->mutex, &ts);
-        } else
-            pthread_cond_wait(&cpu->cond, &cpu->mutex);
+            get_wait_ts(cpu, &ts1);
+            if (ts_after(&ts0, &ts1)) {
+                ts0 = ts1;
+            }
+        } 
+        pthread_mutex_lock(&cpu->mutex); 
+        pthread_cond_timedwait(&cpu->cond, &cpu->mutex, &ts0);
+        pthread_mutex_unlock(&cpu->mutex); 
         wakeup_sleep_if_need(cpu);
     }
 
-    lh = l_first(&cpu->ready);
-    l_del(lh);
-    cpu->run = l_entry(lh, struct th, node);
-    pthread_mutex_unlock(&cpu->mutex); 
+    cpu->run = pop_from_ready(cpu);
 
-    if (old && old!=cpu->run) {
+    if (old==cpu->run)
+        return;
+
+    if (old) {
         swapcontext(&old->uc, &cpu->run->uc);
     } else 
         setcontext(&cpu->run->uc);
@@ -79,7 +121,6 @@ static void *cpu_func(void *arg)
 {
     struct cpu      *cpu = (struct cpu *)arg; 
     unsigned long   nr_switch = 0;
-    struct lh       *lh;
     struct th       *th;
     cpu_set_t       cpuset;
     int             ret;
@@ -118,6 +159,7 @@ static void init_cpu(void)
         l_init(&cpu->sleep);
         pthread_mutex_init(&cpu->mutex, NULL);
         pthread_cond_init(&cpu->cond, NULL);
+        pthread_spin_init(&cpu->spin, PTHREAD_PROCESS_PRIVATE);
         pthread_create(&cpu->pth, NULL, cpu_func, cpu);
     }
 }
@@ -133,7 +175,7 @@ struct th *th_create(int cpu_id, void (*func)(struct th *), void *arg)
 
     th = (struct th *)buf;
     getcontext(&th->uc);
-    th->uc.uc_stack.ss_sp = buf + STACK_SIZE;
+    th->uc.uc_stack.ss_sp = buf + sizeof(struct th);
     th->uc.uc_stack.ss_size = STACK_SIZE;
     th->uc.uc_link = &cpu->uc;
     th->cpu = cpu_id;
@@ -141,10 +183,8 @@ struct th *th_create(int cpu_id, void (*func)(struct th *), void *arg)
     th->arg = arg;
     l_init(&th->node);
     makecontext(&th->uc, (ctx_func_t)func, 1, th);
-    pthread_mutex_lock(&cpu->mutex);
-    l_add_tail(&th->node, &cpu->ready);
+    append_to_ready(th, cpu);
     pthread_cond_signal(&cpu->cond);
-    pthread_mutex_unlock(&cpu->mutex);
 
     return th;
 }
@@ -157,33 +197,27 @@ static struct th *th_self(void)
 
 int th_usleep(unsigned long usec)
 {
-    struct th       *th = th_self();
+    struct th       *c, *th = th_self();
     struct timespec *ts = &th->sleep;
     struct cpu      *cpu = &g_cpu[th->cpu];
+    struct lh       *lh; 
 
     clock_gettime(CLOCK_REALTIME, ts);
     ts->tv_nsec += usec * 1000;
-    if (ts->tv_nsec >= 1000000000UL) {
-        unsigned long   sec = ts->tv_nsec / 1000000000UL;
-        ts->tv_sec += sec;
-        ts->tv_nsec -= sec * 1000000000UL;
-    }
+    ts_adjust(ts);
 
-    pthread_mutex_lock(&cpu->mutex);
-    do {
-        struct lh   *lh; 
-        struct th   *c; 
-        struct timespec *t;
-        for (lh=cpu->sleep.next; lh!=&cpu->sleep; lh=lh->next) {
-            c = l_entry(lh, struct th, node);
-            t = &c->sleep;
-            if (t->tv_sec<ts->tv_sec || (t->tv_sec==ts->tv_sec && t->tv_nsec<ts->tv_nsec))
-                break;
-        }
-        l_add_raw(&th->node, lh->prev, lh);
-    }while(0);
-    pthread_mutex_unlock(&cpu->mutex);
+    for (lh=cpu->sleep.next; lh!=&cpu->sleep; lh=lh->next) {
+        c = l_entry(lh, struct th, node);
+        if (ts_after(ts, &c->sleep))
+            break;
+    }
+    /* insert before lh */
+    l_add_raw(&th->node, lh->prev, lh);
+    th->state = TH_SLEEP; 
+
     sched(cpu);
+
+    return 0;
 }
 
 
@@ -191,19 +225,15 @@ int th_yield(void)
 {
     struct th   *th = th_self();
     struct cpu  *cpu = &g_cpu[th->cpu];
-    struct lh   *lh;
 
-    pthread_mutex_lock(&cpu->mutex);
-
-    assert(th==cpu->run);
-    
+    pthread_spin_lock(&cpu->spin);
     if (l_empty(&cpu->ready)) {
-        pthread_mutex_unlock(&cpu->mutex);
+        pthread_spin_unlock(&cpu->spin);
         return 0;
     }
 
-    l_add_tail(&th->node, &cpu->ready);
-    pthread_mutex_unlock(&cpu->mutex);
+    append_to_ready_unlocked(th, cpu);
+    pthread_spin_unlock(&cpu->spin);
 
     sched(cpu);
     
@@ -216,101 +246,122 @@ int th_join(struct th *th)
     struct cpu  *cpu = &g_cpu[th->cpu];
 
     pthread_mutex_lock(&cpu->mutex);
-
-    while (!th->done)
+    while (!th->done) 
         pthread_cond_wait(&cpu->cond, &cpu->mutex);
+    pthread_mutex_unlock(&cpu->mutex);
 
     free(th);
-    
-    pthread_mutex_unlock(&cpu->mutex);
+    return 0;
 }
 
 int th_lk_init(struct lk *lk)
 {
     lk->locked = 0;
     l_init(&lk->wait);
-    pthread_mutex_init(&lk->mutex, NULL);
+    pthread_spin_init(&lk->spin, PTHREAD_PROCESS_PRIVATE);
+    return 0;
 }
 
 int th_lk_lock(struct lk *lk)
 {
-    pthread_mutex_lock(&lk->mutex);
+    pthread_spin_lock(&lk->spin);
     while (lk->locked) {
         struct th   *th = th_self();
 
         l_add_tail(&th->node, &lk->wait);
-        pthread_mutex_unlock(&lk->mutex);
+        th->state = TH_WAIT_LK; 
+        pthread_spin_unlock(&lk->spin);
         sched(&g_cpu[th->cpu]);
-        pthread_mutex_lock(&lk->mutex);
+        pthread_spin_lock(&lk->spin);
     }
     lk->locked = 1;
-    pthread_mutex_unlock(&lk->mutex);
+    pthread_spin_unlock(&lk->spin);
+    return 0;
 }
 
 int th_lk_unlock(struct lk *lk)
 {
-    pthread_mutex_lock(&lk->mutex);
-    assert(lk->locked);
-    if (!l_empty(&lk->wait)) {
-        struct th   *th = l_entry(l_first(&lk->wait), struct th, node);
-        struct cpu  *cpu = &g_cpu[th->cpu];
+    struct th   *th = NULL;
 
+    pthread_spin_lock(&lk->spin);
+    lk->locked = 0;
+    if (!l_empty(&lk->wait)) {
+        th = l_entry(l_first(&lk->wait), struct th, node);
         l_del(&th->node);
-        l_add_tail(&th->node, &cpu->ready);
+    }
+    pthread_spin_unlock(&lk->spin);
+
+    if (th) {
+        struct cpu *cpu = &g_cpu[th->cpu];
+
+        append_to_ready(th, cpu);
         pthread_cond_signal(&cpu->cond);
     }
-    pthread_mutex_unlock(&lk->mutex);
+    return 0;
 }
 
 int th_cd_init(struct cd *cd)
 {
     cd->val = 0;
     l_init(&cd->wait);
-    pthread_mutex_init(&cd->mutex, NULL);
+    pthread_spin_init(&cd->spin, PTHREAD_PROCESS_PRIVATE);
+    return 0;
 }
 
 int th_cd_wait(struct cd *cd)
 {
-    pthread_mutex_lock(&cd->mutex);
+    pthread_spin_lock(&cd->spin);
     while (cd->val<=0) {
         struct th   *th = th_self();
         
         l_add_tail(&th->node, &cd->wait);
+        th->state = TH_WAIT_CD; 
+        pthread_spin_unlock(&cd->spin);
         sched(&g_cpu[th->cpu]);
+        pthread_spin_lock(&cd->spin);
     }
     cd->val --;
-    pthread_mutex_unlock(&cd->mutex);
+    pthread_spin_unlock(&cd->spin);
+    return 0;
 }
 
 int th_cd_signal(struct cd *cd)
 {
-    pthread_mutex_lock(&cd->mutex);
+    struct th   *th = NULL;
+
+    pthread_spin_lock(&cd->spin);
     cd->val ++;
     if (!l_empty(&cd->wait)) {
-        struct th   *th = l_entry(l_first(&cd->wait), struct th, node);
+        th = l_entry(l_first(&cd->wait), struct th, node);
+        l_del(&th->node);
+    }
+    pthread_spin_unlock(&cd->spin);
+
+    if (th) {
         struct cpu  *cpu = &g_cpu[th->cpu];
 
-        l_del(&th->node);
-        l_add_tail(&th->node, &cpu->ready);
+        append_to_ready(th, cpu);
         pthread_cond_signal(&cpu->cond);
     }
-    pthread_mutex_unlock(&cd->mutex);
+    return 0;
 }
 
 int th_cd_bcast(struct cd *cd)
 {
-    pthread_mutex_lock(&cd->mutex);
+    pthread_spin_lock(&cd->spin);
     cd->val = 0;
     while (!l_empty(&cd->wait)) {
         struct th   *th = l_entry(l_first(&cd->wait), struct th, node);
         struct cpu  *cpu = &g_cpu[th->cpu];
 
-        cd->val ++;
         l_del(&th->node);
-        l_add_tail(&th->node, &cpu->ready);
+        pthread_spin_unlock(&cd->spin);
+        append_to_ready(th, cpu);
         pthread_cond_signal(&cpu->cond);
+        pthread_spin_lock(&cd->spin);
     }
-    pthread_mutex_unlock(&cd->mutex);
+    pthread_spin_unlock(&cd->spin);
+    return 0;
 }
 
 void test_func2(struct th *th)

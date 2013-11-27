@@ -61,8 +61,15 @@ struct cpu {
     struct lh           sleep;
     pthread_mutex_t     mutex;
     pthread_cond_t      cond;
+    pthread_spinlock_t  spin;
     int                 id;
 };
+
+#define TH_RUN          0
+#define TH_READY        1
+#define TH_SLEEP        2
+#define TH_WAIT_LK      3
+#define TH_WAIT_CD      4
 
 struct th {
     ucontext_t          uc;
@@ -72,18 +79,19 @@ struct th {
     int                 cpu;
     struct timespec     sleep;
     struct lh           node;
+    int                 state;
 };
 
 struct lk {
     int                 locked;
     struct lh           wait;
-    pthread_mutex_t     mutex;
+    pthread_spinlock_t  spin;
 };
 
 struct cd {
     int                 val;
     struct lh           wait;
-    pthread_mutex_t     mutex;
+    pthread_spinlock_t  spin;
 };
 
 struct th *th_create(int cpu_id, void (*func)(struct th *), void *arg);
