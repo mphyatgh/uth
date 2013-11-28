@@ -3,8 +3,8 @@
 #define __th_h__    1
 
 #include <pthread.h>
-#include <ucontext.h>
 #include <time.h>
+#include "ctx.h"
 
 struct lh {
     struct  lh          *next; 
@@ -54,7 +54,7 @@ static inline int l_empty(struct lh *lh)
  
 
 struct cpu {
-    ucontext_t          uc;
+    ctx_t               uc;
     pthread_t           pth;
     struct th           *run;
     struct lh           ready;
@@ -72,7 +72,7 @@ struct cpu {
 #define TH_WAIT_CD      4
 
 struct th {
-    ucontext_t          uc;
+    ctx_t               uc;
     void                *(*func)(void *);
     void                *arg;
     int                 done;

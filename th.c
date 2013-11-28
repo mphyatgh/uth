@@ -112,9 +112,10 @@ static void sched(struct cpu *cpu)
         return;
 
     if (old) {
-        swapcontext(&old->uc, &cpu->run->uc);
-    } else 
-        setcontext(&cpu->run->uc);
+        swap_ctx(&old->uc, &cpu->run->uc);
+    } else {
+        set_ctx(&cpu->run->uc);
+    }
 }
 
 static void *cpu_func(void *arg)
@@ -130,7 +131,7 @@ static void *cpu_func(void *arg)
     ret = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
     assert(ret==0);
 
-    getcontext(&cpu->uc);
+    get_ctx(&cpu->uc);
     if (nr_switch) {
         /* th exit */
         th = cpu->run;
@@ -173,8 +174,9 @@ struct th *th_create(int cpu_id, void (*func)(struct th *), void *arg)
     buf = malloc(sizeof(struct th) + STACK_SIZE);
     assert(buf);
 
+
     th = (struct th *)buf;
-    getcontext(&th->uc);
+    get_ctx(&th->uc);
     th->uc.uc_stack.ss_sp = buf + sizeof(struct th);
     th->uc.uc_stack.ss_size = STACK_SIZE;
     th->uc.uc_link = &cpu->uc;
@@ -182,7 +184,7 @@ struct th *th_create(int cpu_id, void (*func)(struct th *), void *arg)
     th->done = 0;
     th->arg = arg;
     l_init(&th->node);
-    makecontext(&th->uc, (ctx_func_t)func, 1, th);
+    make_ctx(&th->uc, (ctx_func_t)func, 1, th);
     append_to_ready(th, cpu);
     pthread_cond_signal(&cpu->cond);
 
@@ -392,11 +394,12 @@ int main()
     struct th   *th_1, *th_2;
 
     init_cpu();
+    sleep(1);
 
     th_1 = th_create(0, test_func1, "test 1");
-    th_2 = th_create(0, test_func2, "test 2");
+//    th_2 = th_create(0, test_func2, "test 2");
     th_join(th_1);
-    th_join(th_2);
+//    th_join(th_2);
 
     printf("line: %d\n", __LINE__);
     while(1) {
