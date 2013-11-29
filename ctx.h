@@ -20,7 +20,7 @@
 #define O_RIP     128
 
 #ifndef __ASSEMBLER__
-#define __USE_UCONTEXT__
+//#define __USE_UCONTEXT__
 
 #ifdef __USE_UCONTEXT__
 #include <ucontext.h>
@@ -61,17 +61,23 @@ typedef struct ctx_s ctx_t;
 int get_ctx(ctx_t *c);
 int set_ctx(ctx_t *c);
 int swap_ctx(ctx_t *c, ctx_t *n);
+int start_ctx(void);
 static inline int make_ctx(ctx_t *c, void (*func)(void), int argc, void *argv)
 {
-    unsigned long   *sp;
+    unsigned long   *sp, spl;
 
-    sp = (unsigned long *)(c->uc_stack.ss_sp + c->uc_stack.ss_size);
-    *sp = (unsigned long)c->uc_link;
-    printf("rip: %lx\n", c->uc_link->rip);
-    sp--;
-    c->rsp = (unsigned long)sp;
+    spl = (unsigned long)(c->uc_stack.ss_sp + c->uc_stack.ss_size);
+    spl &= -16L;
+    spl -= 16;
+
+    sp = (unsigned long *)spl;
     c->rip = (unsigned long)func;
+    c->rbx = (unsigned long)&sp[1];
     c->rdi = (unsigned long)argv;
+    c->rsp = (unsigned long)sp;
+    sp[0] = (unsigned long)start_ctx;
+    sp[1] = (unsigned long)c->uc_link;
+    printf("rbx = %p\n", &sp[1]);
     return 0;
 }
 

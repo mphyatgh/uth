@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <sched.h>
+#include <unistd.h>
 #include "th.h"
 
 #define NR_CPU      1
@@ -163,6 +164,7 @@ static void init_cpu(void)
         pthread_spin_init(&cpu->spin, PTHREAD_PROCESS_PRIVATE);
         pthread_create(&cpu->pth, NULL, cpu_func, cpu);
     }
+    usleep(10000);
 }
 
 struct th *th_create(int cpu_id, void (*func)(struct th *), void *arg)
@@ -366,17 +368,6 @@ int th_cd_bcast(struct cd *cd)
     return 0;
 }
 
-void test_func2(struct th *th)
-{
-    char    *name = (char *)th->arg;
-    int     i = 0;
-   
-    for (i=0; i<10; i++) {
-        printf("name = %s, %d\n", name, i);
-        th_yield();
-    }
-}
-
 void test_func1(struct th *th)
 {
     char    *name = (char *)th->arg;
@@ -384,22 +375,24 @@ void test_func1(struct th *th)
    
     for (i=0; i<10; i++) {
         printf("name = %s, %d\n", name, i);
-        th_usleep(100000UL);
+        th_usleep(10000);
     }
-    printf("end\n");
+}
+
+void show_args(void *p1, void *p2)
+{
+    printf("p1 = %p, p2 = %p\n", p1, p2);
+    while(1);
 }
 
 int main()
 {
-    struct th   *th_1, *th_2;
+    struct th   *th_1;
 
     init_cpu();
-    sleep(1);
 
     th_1 = th_create(0, test_func1, "test 1");
-//    th_2 = th_create(0, test_func2, "test 2");
     th_join(th_1);
-//    th_join(th_2);
 
     printf("line: %d\n", __LINE__);
     while(1) {
