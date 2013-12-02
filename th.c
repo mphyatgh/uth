@@ -20,7 +20,7 @@ static inline void ts_adjust(struct timespec *ts)
     if (ts->tv_nsec >= 1000000000UL) {
         ldiv_t  q = ldiv(ts->tv_nsec, 1000000000L);
         ts->tv_sec += q.quot;
-        ts->tv_nsec -=  q.rem;
+        ts->tv_nsec =  q.rem;
     }
 }
 
@@ -50,8 +50,8 @@ static inline void append_to_ready(struct th *th, struct cpu *cpu)
 {
     pthread_spin_lock(&cpu->spin);
     l_add_tail(&th->node, &cpu->ready);
-    pthread_spin_unlock(&cpu->spin);
     th->state = TH_READY;
+    pthread_spin_unlock(&cpu->spin);
 }
 
 static inline struct th *pop_from_ready(struct cpu *cpu)
