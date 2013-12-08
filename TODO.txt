@@ -1,7 +1,10 @@
 
+todo: 
 - write a manual
-- add same comments to the code
-- add th_lk_trylock() and th_cd_timedwait()
+- add comments 
+========================== has done =========================
+- (has done) add same comments to the code
+- (has done) add th_lk_trylock() and th_cd_timedwait()
 
 
 

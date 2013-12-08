@@ -68,8 +68,8 @@ struct cpu {
 #define TH_RUN          0
 #define TH_READY        1
 #define TH_SLEEP        2
-#define TH_WAIT_LK      3
-#define TH_WAIT_CD      4
+#define TH_WAIT_LK      4
+#define TH_WAIT_CD      8
 
 struct th {
     ctx_t               uc;
@@ -78,7 +78,8 @@ struct th {
     int                 done;
     int                 cpu;
     struct timespec     sleep;
-    struct lh           node;
+    struct lh           node;               /* link to ready_q or lk/cd */
+    struct lh           snode;              /* link to sleep_q */
     int                 state;
 };
 
@@ -97,9 +98,11 @@ struct cd {
 struct th *th_create(int cpu_id, void (*func)(struct th *), void *arg);
 int th_join(struct th *th);
 int th_lk_init(struct lk *lk);
+int th_lk_trylock(struct lk *lk);
 int th_lk_lock(struct lk *lk);
 int th_lk_unlock(struct lk *lk);
 int th_cd_init(struct cd *cd);
+int th_cd_timedwait(struct cd *cd, unsigned long usec);
 int th_cd_wait(struct cd *cd);
 int th_cd_signal(struct cd *cd);
 int th_cd_bcast(struct cd *cd);
