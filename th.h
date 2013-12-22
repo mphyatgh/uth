@@ -65,24 +65,6 @@ struct cpu {
     int                 id;
 };
 
-#define TH_RUN          0
-#define TH_READY        1
-#define TH_SLEEP        2
-#define TH_WAIT_LK      4
-#define TH_WAIT_CD      8
-
-struct th {
-    ctx_t               uc;
-    void                *(*func)(void *);
-    void                *arg;
-    int                 done;
-    int                 cpu;
-    struct timespec     sleep;
-    struct lh           node;               /* link to ready_q or lk/cd */
-    struct lh           snode;              /* link to sleep_q */
-    int                 state;
-};
-
 struct lk {
     int                 locked;
     struct lh           wait;
@@ -94,6 +76,26 @@ struct cd {
     struct lh           wait;
     pthread_spinlock_t  spin;
 };
+
+#define TH_RUN          0
+#define TH_READY        1
+#define TH_SLEEP        2
+#define TH_WAIT_LK      4
+#define TH_WAIT_CD      8
+
+struct th {
+    ctx_t               uc;
+    void                *(*func)(void *);
+    void                *arg;
+    int                 done;
+    struct cd           done_cd;
+    int                 cpu;
+    struct timespec     sleep;
+    struct lh           node;               /* link to ready_q or lk/cd */
+    struct lh           snode;              /* link to sleep_q */
+    int                 state;
+};
+
 
 struct th *th_create(int cpu_id, void (*func)(struct th *), void *arg);
 int th_join(struct th *th);

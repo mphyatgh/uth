@@ -141,7 +141,8 @@ static void *cpu_func(void *arg)
         th = cpu->run;
         cpu->run = NULL;
         th->done = 1;
-        pthread_cond_signal(&cpu->cond);
+        pthread_cond_broadcast(&cpu->cond);
+        th_cd_signal(&th->done_cd);
         /* th free in th_join() */
     }
     nr_switch ++;
@@ -187,6 +188,7 @@ struct th *th_create(int cpu_id, void (*func)(struct th *), void *arg)
     th->uc.uc_link = &cpu->uc;
     th->cpu = cpu_id;
     th->done = 0;
+    th_cd_init(&th->done_cd);
     th->arg = arg;
     l_init(&th->node);
     l_init(&th->snode);
@@ -258,14 +260,31 @@ int th_yield(void)
     return 1;
 }
 
+static int I_am_uth(void)
+{
+    int         i;
+    pthread_t   self = pthread_self();
+
+    for (i=0; i<NR_CPU; i++) {
+        if (g_cpu[i].pth == self)
+            return 1;
+    }
+    return 0;
+}
+
 
 int th_join(struct th *th)
 {
     struct cpu  *cpu = &g_cpu[th->cpu];
+    int         uth = I_am_uth();
 
     pthread_mutex_lock(&cpu->mutex);
-    while (!th->done) 
-        pthread_cond_wait(&cpu->cond, &cpu->mutex);
+    while (!th->done) {
+        if (uth) 
+            th_cd_wait(&th->done_cd);
+        else
+            pthread_cond_wait(&cpu->cond, &cpu->mutex);
+    }
     pthread_mutex_unlock(&cpu->mutex);
 
     free(th);
