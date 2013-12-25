@@ -74,16 +74,19 @@ static void wakeup_sleep_if_need(struct cpu *cpu)
     if (l_empty(&cpu->sleep))
         return;
 
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    pthread_spin_lock(&cpu->spin);
     th = l_entry(l_first(&cpu->sleep), struct th, snode);
     
-    clock_gettime(CLOCK_REALTIME, &ts);
     if (ts_after(&ts, &th->sleep)) {
         l_del(&th->snode);
         if (th->state & (TH_WAIT_LK|TH_WAIT_CD)) {
             l_del(&th->node);
         }
-        append_to_ready(th, cpu);
+        append_to_ready_unlocked(th, cpu);
     }
+    pthread_spin_lock(&cpu->spin);
 }
 
 static void sched(struct cpu *cpu)
@@ -218,6 +221,7 @@ static void insert_to_sleep_q(struct th *th, unsigned long usec)
     ts->tv_nsec += usec * 1000;
     ts_adjust(ts);
 
+    pthread_spin_lock(&cpu->spin);
     for (lh=cpu->sleep.next; lh!=&cpu->sleep; lh=lh->next) {
         c = l_entry(lh, struct th, snode);
         if (ts_after(ts, &c->sleep))
@@ -225,6 +229,7 @@ static void insert_to_sleep_q(struct th *th, unsigned long usec)
     }
     /* insert before lh */
     l_add_raw(&th->snode, lh->prev, lh);
+    pthread_spin_unlock(&cpu->spin);
 }
 
 int th_usleep(unsigned long usec)
@@ -232,9 +237,11 @@ int th_usleep(unsigned long usec)
     struct th       *th = th_self();
     struct cpu      *cpu = &g_cpu[th->cpu];
 
+    pthread_spin_lock(&cpu->spin);
     l_del(&th->node);
     insert_to_sleep_q(th, usec);
     th->state = TH_SLEEP; 
+    pthread_spin_unlock(&cpu->spin);
     sched(cpu);
 
     return 0;
@@ -381,11 +388,14 @@ int th_cd_timedwait(struct cd *cd, unsigned long usec)
     pthread_spin_lock(&cd->spin);
     while (cd->val<=0) {
         struct th   *th = th_self();
+        struct cpu  *cpu = &g_cpu[th->cpu];
         
         l_add_tail(&th->node, &cd->wait);
+        pthread_spin_lock(&cpu->spin);
         th->state = TH_WAIT_CD|TH_SLEEP; 
-        pthread_spin_unlock(&cd->spin);
         insert_to_sleep_q(th, usec);
+        pthread_spin_unlock(&cpu->spin);
+        pthread_spin_unlock(&cd->spin);
         sched(&g_cpu[th->cpu]);
         pthread_spin_lock(&cd->spin);
     }
